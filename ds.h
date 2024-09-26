@@ -61,6 +61,7 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <ctype.h>
 
 // TODO: rework the hash table to actually work
 
@@ -188,10 +189,16 @@ DSHDEF void ds_string_slice_init(ds_string_slice *ss, char *str,
                                  unsigned int len);
 DSHDEF int ds_string_slice_tokenize(ds_string_slice *ss, char delimiter,
                                     ds_string_slice *token);
+DSHDEF int ds_string_slice_take_while_pred(ds_string_slice *ss, int (*predicate)(char), ds_string_slice *token);
+DSHDEF int ds_string_slice_trim_left_ws(ds_string_slice *ss);
 DSHDEF int ds_string_slice_trim_left(ds_string_slice *ss, char chr);
 DSHDEF int ds_string_slice_trim_right(ds_string_slice *ss, char chr);
 DSHDEF int ds_string_slice_trim(ds_string_slice *ss, char chr);
 DSHDEF int ds_string_slice_to_owned(ds_string_slice *ss, char **str);
+DSHDEF int ds_string_slice_starts_with(ds_string_slice *ss, char *str);
+DSHDEF int ds_string_slice_starts_with_pred(ds_string_slice *ss, int (*predicate)(char));
+DSHDEF int ds_string_slice_step(ds_string_slice *ss, int count);
+DSHDEF int ds_string_slice_empty(ds_string_slice *ss);
 DSHDEF void ds_string_slice_free(ds_string_slice *ss);
 
 // (DOUBLY) LINKED LIST
@@ -861,6 +868,47 @@ defer:
     return result;
 }
 
+DSHDEF int ds_string_slice_take_while_pred(ds_string_slice *ss, int (*predicate)(char), ds_string_slice *token) {
+    int result = 0;
+
+    if (ss->len == 0 || ss->str == NULL) {
+        return_defer(1);
+    }
+
+    token->str = ss->str;
+    token->len = 0;
+
+    for (unsigned int i = 0; i < ss->len; i++) {
+        if (predicate(ss->str[i]) == 0) {
+            token->len = i;
+            ss->str += i;
+            ss->len -= i;
+            return_defer(0);
+        }
+    }
+
+    token->len = ss->len;
+    ss->str += ss->len;
+    ss->len = 0;
+
+defer:
+    return result;
+}
+
+// Trim the left side of the string slice by whitespaces
+//
+// Returns 0 if the string was trimmed successfully, 1 if the string slice is
+DSHDEF int ds_string_slice_trim_left_ws(ds_string_slice *ss) {
+    int result = 0;
+
+    while (ss->len > 0 && isspace(ss->str[0])) {
+        ss->str++;
+        ss->len--;
+    }
+
+    return result;
+}
+
 // Trim the left side of the string slice by a character
 //
 // Returns 0 if the string was trimmed successfully, 1 if the string slice is
@@ -924,6 +972,25 @@ DSHDEF int ds_string_slice_to_owned(ds_string_slice *ss, char **str) {
 
 defer:
     return result;
+}
+
+DSHDEF int ds_string_slice_starts_with(ds_string_slice *ss, char *str) {
+    return strncmp(ss->str, str, strlen(str));
+}
+
+DSHDEF int ds_string_slice_starts_with_pred(ds_string_slice *ss, int (*predicate)(char)) {
+    return predicate(*ss->str);
+}
+
+DSHDEF int ds_string_slice_step(ds_string_slice *ss, int count) {
+    ss->str += count;
+    ss->len -= count;
+
+    return 0;
+}
+
+DSHDEF int ds_string_slice_empty(ds_string_slice *ss) {
+    return *ss->str == '\0';
 }
 
 // Free the string slice
