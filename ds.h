@@ -337,6 +337,7 @@ DSHDEF void ds_argparse_parser_free(struct ds_argparse_parser *parser);
 DSHDEF int ds_io_read_file(const char *path, char **buffer);
 DSHDEF int ds_io_write_file(const char *path, const char *buffer, const char *mode);
 DSHDEF int ds_io_read_binary(const char *filename, char **buffer);
+DSHDEF int ds_io_write_binary(const char *filename, char *buffer, unsigned int buffer_len);
 
 // RETURN DEFER
 //
@@ -2626,6 +2627,42 @@ defer:
     if (filename != NULL && file != NULL)
         fclose(file);
     ds_string_builder_free(&sb);
+    return result;
+}
+
+// Write a binary file
+//
+// Writes the contents of a buffer into a binary file.
+//
+// Arguments:
+// - filename: name of the file to read
+// - buffer: pointer to the buffer to use on write
+// - buffer_len: the size of the buffer
+//
+// Returns:
+// - the number of bytes written
+DSHDEF int ds_io_write_binary(const char *filename, char *buffer, unsigned int buffer_len) {
+    int result = 0;
+    unsigned long buffer_size;
+    FILE *file = NULL;
+
+    if (filename != NULL) {
+        file = fopen(filename, "wb");
+        if (file == NULL) {
+            DS_LOG_ERROR("Failed to open file: %s", filename);
+            return_defer(-1);
+        }
+    } else {
+        file = stdout;
+    }
+
+    buffer_size = fwrite(buffer, sizeof(char), buffer_len, file);
+    result = buffer_size;
+
+defer:
+    if (filename != NULL && file != NULL)
+        fclose(file);
+
     return result;
 }
 

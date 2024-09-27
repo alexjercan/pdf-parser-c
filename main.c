@@ -1,9 +1,15 @@
+#include <assert.h>
 #define DS_DA_IMPLEMENTATION
 #define DS_SS_IMPLEMENTATION
 #define DS_SB_IMPLEMENTATION
 #define DS_IO_IMPLEMENTATION
 #include "ds.h"
 #include "zlib.h"
+
+typedef enum filter_kind {
+    filter_flate_decode,
+    filter_dct_decode
+} filter_kind;
 
 typedef enum object_kind {
     object_boolean,
@@ -54,7 +60,7 @@ typedef struct object_kv {
 } object_kv;
 
 typedef struct pdf {
-    ds_dynamic_array objects; /* object_t */
+    ds_dynamic_array objects; /* indirect_object */
 } pdf_t;
 
 void skip_comments(ds_string_slice *slice) {
@@ -308,43 +314,6 @@ defer:
     return result;
 }
 
-void show_stream(ds_string_slice stream) {
-    Bytef *source = (Bytef *)(stream.str);
-    uLong sourceLen = (uLong)(stream.len);
-    uLongf destLen = sourceLen * 8;
-    Bytef *dest = calloc(sizeof(Bytef), destLen);
-    int result = uncompress(dest, &destLen, source, sourceLen);
-    if (result != Z_OK) {
-        DS_LOG_ERROR("Failed to uncompress data at : %d", result);
-    }
-
-    ds_string_builder string_builder;
-    ds_string_builder_init(&string_builder);
-    char *text = (char *)dest;
-    int text_len = (int)destLen;
-
-    for (int j = 0; j < text_len; j++) {
-        if (text[j] == '(') {
-            j = j + 1;
-
-            for (; j < text_len; j++) {
-                if (text[j] == ')') {
-                    break;
-                }
-
-                ds_string_builder_appendc(&string_builder, text[j]);
-            }
-        }
-    }
-
-    char *plain_text = NULL;
-    result = ds_string_builder_build(&string_builder, &plain_text);
-    if (result != 0) {
-        DS_LOG_ERROR("Could not extract text");
-    }
-    DS_LOG_INFO("Extracted text: '%s'", plain_text);
-}
-
 int parse_direct_object(ds_string_slice *slice, object_t *object) {
     int result = 0;
 
@@ -364,8 +333,6 @@ int parse_direct_object(ds_string_slice *slice, object_t *object) {
             DS_LOG_ERROR("Failed to parse stream");
             return_defer(1);
         }
-
-        show_stream(object->stream);
     } else if (ds_string_slice_starts_with(slice, "[") == 0) {
         if (parse_array_object(slice, object) != 0) {
             DS_LOG_ERROR("Failed to parse array");
@@ -457,6 +424,7 @@ int parse_pdf(char *buffer, int buffer_len, pdf_t *pdf) {
 
     while (1) {
         skip_comments(&slice);
+        ds_string_slice_trim_left_ws(&slice);
         if (ds_string_slice_empty(&slice)) {
             break;
         }
@@ -474,6 +442,66 @@ defer:
     return result;
 }
 
+filter_kind get_filter_kind(ds_dynamic_array dictionary /* object_kv */) {
+    for (int i = 0; i < dictionary.count; i++) {
+        object_kv kv = {0};
+        ds_dynamic_array_get(&dictionary, i, &kv);
+
+        if (strncmp(kv.name, "Filter", 6) == 0) {
+            assert(kv.object.kind == object_name);
+
+            if (strncmp(kv.object.name, "FlateDecode", 11) == 0) {
+                return filter_flate_decode;
+            } else if (strncmp(kv.object.name, "DCTDecode", 9) == 0) {
+                return filter_dct_decode;
+            }
+        }
+    }
+
+    return 2;
+}
+
+void show_text(ds_string_slice stream) {
+    Bytef *source = (Bytef *)(stream.str);
+    uLong sourceLen = (uLong)(stream.len);
+    uLongf destLen = sourceLen * 8;
+    Bytef *dest = calloc(sizeof(Bytef), destLen);
+    int result = uncompress(dest, &destLen, source, sourceLen);
+    if (result != Z_OK) {
+        DS_LOG_ERROR("Failed to uncompress data at : %d", result);
+    }
+
+    ds_string_builder string_builder;
+    ds_string_builder_init(&string_builder);
+    char *text = (char *)dest;
+    int text_len = (int)destLen;
+
+    for (int j = 0; j < text_len; j++) {
+        if (text[j] == '(') {
+            j = j + 1;
+
+            for (; j < text_len; j++) {
+                if (text[j] == ')') {
+                    break;
+                }
+
+                ds_string_builder_appendc(&string_builder, text[j]);
+            }
+        }
+    }
+
+    char *plain_text = NULL;
+    result = ds_string_builder_build(&string_builder, &plain_text);
+    if (result != 0) {
+        DS_LOG_ERROR("Could not extract text");
+    }
+    DS_LOG_INFO("Extracted text: '%s'", plain_text);
+}
+
+void show_image(ds_string_slice stream) {
+    ds_io_write_binary("image.jpeg", stream.str, stream.len);
+}
+
 int main() {
     int result = 0;
     pdf_t pdf = {0};
@@ -488,6 +516,38 @@ int main() {
     if (result != 0) {
         DS_LOG_ERROR("Failed to parse the buffer: %d", result);
         return_defer(-1);
+    }
+
+    for (int i = 0; i < pdf.objects.count; i++) {
+        indirect_object object = {0};
+        ds_dynamic_array_get(&pdf.objects, i, &object);
+
+        int is_stream = 0;
+        for (int j = 0; j < object.objects.count; j++) {
+            object_t obj = {0};
+            ds_dynamic_array_get(&object.objects, j, &obj);
+            if (obj.kind == object_stream) {
+                is_stream = 1;
+                break;
+            }
+        }
+
+        if (is_stream == 1) {
+            object_t dictionary = {0};
+            ds_dynamic_array_get(&object.objects, 0, &dictionary);
+            assert(dictionary.kind == object_dictionary);
+
+            object_t stream = {0};
+            ds_dynamic_array_get(&object.objects, 1, &stream);
+            assert(stream.kind == object_stream);
+
+            filter_kind kind = get_filter_kind(dictionary.dictionary);
+
+            switch (kind) {
+            case filter_flate_decode: show_text(stream.stream); break;
+            case filter_dct_decode: show_image(stream.stream); break;
+            }
+        }
     }
 
 defer:
