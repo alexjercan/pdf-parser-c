@@ -1,8 +1,12 @@
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <assert.h>
 #define DS_DA_IMPLEMENTATION
 #define DS_SS_IMPLEMENTATION
 #define DS_SB_IMPLEMENTATION
 #define DS_IO_IMPLEMENTATION
+#define DS_AP_IMPLEMENTATION
 #include "ds.h"
 #include "zlib.h"
 
@@ -429,7 +433,7 @@ int parse_pdf(char *buffer, int buffer_len, pdf_t *pdf) {
             break;
         }
 
-        if (ds_string_slice_starts_with(&slice, "xref") == 0) {
+        if (ds_string_slice_starts_with(&slice, "xref") == 0 || ds_string_slice_starts_with(&slice, "startxref") == 0) {
             break;
         } else {
             if (parse_indirect_object(&slice, &object) == 0) {
@@ -461,7 +465,7 @@ filter_kind get_filter_kind(ds_dynamic_array dictionary /* object_kv */) {
     return 2;
 }
 
-void show_text(ds_string_slice stream) {
+void show_text(ds_string_slice stream, char *filename, indirect_object object) {
     Bytef *source = (Bytef *)(stream.str);
     uLong sourceLen = (uLong)(stream.len);
     uLongf destLen = sourceLen * 8;
@@ -495,18 +499,62 @@ void show_text(ds_string_slice stream) {
     if (result != 0) {
         DS_LOG_ERROR("Could not extract text");
     }
-    DS_LOG_INFO("Extracted text: '%s'", plain_text);
+
+    ds_string_builder sb = {0};
+    ds_string_builder_init(&sb);
+
+    ds_string_builder_append(&sb, "%s_%d_%d.txt", filename, object.object_number, object.generation_number);
+
+    char *path = NULL;
+    ds_string_builder_build(&sb, &path);
+    ds_io_write_file(path, plain_text, "w");
 }
 
-void show_image(ds_string_slice stream) {
-    ds_io_write_binary("image.jpeg", stream.str, stream.len);
+void show_image(ds_string_slice stream, char *filename, indirect_object object) {
+    ds_string_builder sb = {0};
+    ds_string_builder_init(&sb);
+
+    ds_string_builder_append(&sb, "%s_%d_%d.jpeg", filename, object.object_number, object.generation_number);
+
+    char *path = NULL;
+    ds_string_builder_build(&sb, &path);
+    ds_io_write_binary(path, stream.str, stream.len);
 }
 
-int main() {
+int main(int argc, char **argv) {
     int result = 0;
+    ds_argparse_parser parser;
+    ds_argparse_parser_init(&parser, "pdf-parser", "A simple pdf parser in C", "0.1");
+
+    ds_argparse_add_argument(&parser, (ds_argparse_options){ .short_name = 'i', .long_name = "input", .description = "The input pdf file", .type = ARGUMENT_TYPE_POSITIONAL, .required = 1 });
+    ds_argparse_add_argument(&parser, (ds_argparse_options){ .short_name = 'd', .long_name = "directory", .description = "The directory where the pdf file contents are extracted to", .type = ARGUMENT_TYPE_VALUE, .required = 0 });
+
+    if (ds_argparse_parse(&parser, argc, argv) != 0) {
+        DS_LOG_ERROR("Failed to parse arguments");
+        return_defer(-1);
+    }
+
+    char *filename = ds_argparse_get_value(&parser, "input");
+    char *directory = ds_argparse_get_value(&parser, "directory");
+
+    char *output_path = NULL;
+    ds_string_builder sb = {0};
+    ds_string_builder_init(&sb);
+    struct stat st = {0};
+    if (directory != NULL) {
+        if (stat(directory, &st) == -1) {
+            mkdir(directory, 0700);
+        }
+
+        ds_string_builder_append(&sb, "%s/", directory);
+    }
+
+    ds_string_builder_append(&sb, "%s", filename);
+    ds_string_builder_build(&sb, &output_path);
+
     pdf_t pdf = {0};
     char *buffer = NULL;
-    int buffer_len = ds_io_read_binary("./sample.pdf", &buffer);
+    int buffer_len = ds_io_read_binary(filename, &buffer);
     if (buffer_len < 0) {
         DS_LOG_ERROR("Failed to read the file");
         return_defer(-1);
@@ -544,8 +592,8 @@ int main() {
             filter_kind kind = get_filter_kind(dictionary.dictionary);
 
             switch (kind) {
-            case filter_flate_decode: show_text(stream.stream); break;
-            case filter_dct_decode: show_image(stream.stream); break;
+            case filter_flate_decode: show_text(stream.stream, output_path, object); break;
+            case filter_dct_decode: show_image(stream.stream, output_path, object); break;
             }
         }
     }
